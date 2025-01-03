@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vaultwarden mit Fail2Ban absichern - Anleitung</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      margin: 20px;
+      padding: 20px;
+      background-color: #f4f4f9;
+    }
+    h1, h2, h3 {
+      color: #333;
+    }
+    pre {
+      background: #eee;
+      padding: 10px;
+      border-radius: 5px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: 'Courier New', Courier, monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>Vaultwarden mit Fail2Ban absichern</h1>
+  <p>Diese Anleitung beschreibt Schritt f&uuml;r Schritt, wie du Vaultwarden mit Fail2Ban absicherst.</p>
+
+  <h2>1. Vorbereitung</h2>
+  <h3>1.1 Systemvoraussetzungen</h3>
+  <p>Dieses Setup basiert auf einem System mit:</p>
+  <ul>
+    <li>DietPi als Betriebssystem</li>
+    <li>Docker als Container-Management</li>
+    <li>Vaultwarden im Docker-Container</li>
+    <li>Nginx Proxy Manager im Docker-Container</li>
+  </ul>
+
+  <h3>1.2 Installation der notwendigen Pakete</h3>
+  <p>Installiere die ben&ouml;tigten Pakete:</p>
+  <pre><code>sudo apt update
+sudo apt install fail2ban iptables-persistent</code></pre>
+
+  <h3>1.3 Docker-Setup</h3>
+  <p>Pr&uuml;fe die laufenden Container:</p>
+  <pre><code>docker ps</code></pre>
+  <p>Beispiel-Ausgabe:</p>
+  <pre><code>CONTAINER ID   IMAGE                             COMMAND                  PORTS                      NAMES
+666148fb52cf   vaultwarden/server:latest         "/start.sh"              0.0.0.0:82->80/tcp         vaultwarden
+956bd7efe4bb   jc21/nginx-proxy-manager:latest   "/init"                  0.0.0.0:80,443->80,443/tcp niginxproxy</code></pre>
+
+  <h3>1.4 Wichtige Umgebungsvariablen</h3>
+  <p>Setze die folgenden ENV-Variablen beim Starten des Vaultwarden-Containers:</p>
+  <pre><code>LOGFILE=vaultwarden.log
+TZ=Europe/Berlin</code></pre>
+  <p>Diese Variablen sorgen daf&uuml;r, dass die Logs korrekt im Standardformat gespeichert werden und die Zeitzone stimmt.</p>
+
+  <h2>2. Fail2Ban-Konfiguration</h2>
+  <h3>2.1 Jail-Konfiguration erstellen</h3>
+  <p>Erstelle die Datei <code>/etc/fail2ban/jail.local</code> mit folgendem Inhalt:</p>
+  <pre><code>[DEFAULT]
+# Allgemeine Einstellungen
+bantime  = 3600
+findtime = 600
+maxretry = 5
+backend  = systemd
+ignoreip = 127.0.0.1/8 ::1 172.17.0.0/16
+allowipv6 = auto
+
+# Jail für Vaultwarden
+[vaultwarden]
+enabled = true
+port = http,https
+filter = vaultwarden
+logpath = /mnt/dietpi_userdata/docker-data/volumes/bitwarden_log/_data/vaultwarden.log
+maxretry = 3
+findtime = 600
+bantime = 3600
+backend = auto
+action = iptables-docker
+
+[vaultwarden-admin]
+enabled = true
+port = http,https
+filter = vaultwarden-admin
+logpath = /mnt/dietpi_userdata/docker-data/volumes/bitwarden_log/_data/vaultwarden.log
+maxretry = 2
+findtime = 600
+bantime = 7200
+backend = auto
+action = iptables-docker</code></pre>
+
+  <h3>2.2 Filter f&uuml;r Vaultwarden</h3>
+  <p>Erstelle die Filterdatei <code>/etc/fail2ban/filter.d/vaultwarden.conf</code>:</p>
+  <pre><code>[INCLUDES]
+before = common.conf
+
+[Definition]
+failregex = ^.*Username or password is incorrect. Try again. IP: &lt;ADDR&gt;. Username:.*$
+ignoreregex =</code></pre>
+
+  <p>Und f&uuml;r den Admin-Bereich die Datei <code>/etc/fail2ban/filter.d/vaultwarden-admin.conf</code>:</p>
+  <pre><code>[INCLUDES]
+before = common.conf
+
+[Definition]
+failregex = ^.*Invalid admin token. IP: &lt;ADDR&gt;.*$
+ignoreregex =</code></pre>
+
+  <h2>3. Aktionen f&uuml;r Bann und Unbann</h2>
+  <p>Erstelle die Datei <code>/etc/fail2ban/action.d/iptables-docker.conf</code>:</p>
+  <pre><code>[Definition]
+actionban = /root/scripte/ban-action.sh <ip>
+actionunban = /root/scripte/unban-action.sh <ip>
+</code></pre>
+
+  <h3>3.1 Bann-Skript</h3>
+  <p>Speichere das Skript <code>/root/scripte/ban-action.sh</code>:</p>
+  <pre><code>#!/bin/bash
+LOGFILE="/var/log/ban-action.log"
+IP=$1
+
+echo "$(date) - Bann f&uuml;r IP: $IP" >> $LOGFILE
+iptables -I INPUT -s $IP -j REJECT
+echo "$(date) - Regel hinzugef&uuml;gt f&uuml;r IP: $IP" >> $LOGFILE</code></pre>
+
+  <h3>3.2 Unbann-Skript</h3>
+  <p>Speichere das Skript <code>/root/scripte/unban-action.sh</code>:</p>
+  <pre><code>#!/bin/bash
+LOGFILE="/var/log/unban-action.log"
+IP=$1
+
+echo "$(date) - Unban f&uuml;r IP: $IP" >> $LOGFILE
+iptables -D INPUT -s $IP -j REJECT
+echo "$(date) - Regel entfernt f&uuml;r IP: $IP" >> $LOGFILE</code></pre>
+
+  <h2>4. Berechtigungen setzen</h2>
+  <pre><code>sudo chmod +x /root/scripte/ban-action.sh
+sudo chmod +x /root/scripte/unban-action.sh</code></pre>
+
+  <h2>5. Fail2Ban starten und testen</h2>
+  <p>Starte Fail2Ban neu:</p>
+  <pre><code>sudo systemctl restart fail2ban
+sudo systemctl status fail2ban</code></pre>
+
+  <h3>5.1 Status pr&uuml;fen</h3>
+  <pre><code>sudo fail2ban-client status vaultwarden
+sudo fail2ban-client status vaultwarden-admin</code></pre>
+
+  <h2>6. Regeln dauerhaft speichern</h2>
+  <pre><code>sudo iptables-save > /etc/iptables/rules.v4
+sudo netfilter-persistent save
+sudo netfilter-persistent reload</code></pre>
+
+  <h2>8. Fazit</h2>
+  <p>Vaultwarden ist jetzt durch Fail2Ban gesichert. Diese Konfiguration blockt fehlgeschlagene Login-Versuche sowohl f&uuml;r den Nutzer- als auch den Adminbereich und l&auml;sst sich leicht erweitern.</p>
+  <p><strong>Warum diese spezielle Konfiguration?</strong></p>
+  <p>Da Vaultwarden und der Nginx Proxy Manager in Docker-Containern laufen, war es notwendig, benutzerdefinierte Aktionen und Skripte zu erstellen, um IP-Adressen innerhalb der Docker-Netzwerkstruktur zu sperren. Fail2Ban kann standardm&auml;&szlig;ig keine Regeln in Docker-Ketten verwalten, weshalb wir die Skripte explizit auf die IPTables angewendet haben. Diese L&ouml;sung gew&auml;hrleistet Flexibilit&auml;t und Sicherheit in komplexen Container-Setups.</p>
+<p>&nbsp;</p>
+<p>Lizenz
+Dieses Werk steht unter der Creative Commons Namensnennung - Weitergabe unter gleichen Bedingungen 4.0 International Lizenz (CC BY-SA 4.0).<br/>
+© 2025 von https://github.com/robatsh (ro.bat.sh)</p>
+</body>
+</html>
